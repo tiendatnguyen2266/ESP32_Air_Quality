@@ -1,0 +1,220 @@
+// Đường dẫn URL và khóa API để kết nối với Firebase
+var firebaseUrl = "https://do-an-2-dcead-default-rtdb.firebaseio.com/";
+var firebaseApiKey = "AIzaSyAIOTB2_TEK3EVVzHqZWbhyJ2rmcmF63x8";
+
+function getDataFromFirebase() {
+  // Lấy tên sheet hiện tại từ PropertiesService
+  var sheetName = PropertiesService.getScriptProperties().getProperty('activeSheet');
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+
+  // Kiểm tra nếu sheet không tồn tại
+  if (!sheet) {
+    console.error('Sheet is undefined');
+    return;
+  }
+  
+  // Lấy thời gian hiện tại và định dạng theo múi giờ GMT+7
+  var now = new Date();
+  var timeZone = "GMT+7";
+  var date = Utilities.formatDate(now, timeZone, "yyyy-MM-dd");
+  var time = Utilities.formatDate(now, timeZone, "HH:mm:ss");
+
+  // Gửi yêu cầu tới Firebase để lấy dữ liệu
+  var response = UrlFetchApp.fetch(firebaseUrl + "/.json?auth=" + firebaseApiKey);
+  var data = JSON.parse(response.getContentText());
+
+  // Xử lý và định dạng dữ liệu từ Firebase
+  var nhietDo = (Math.round(data.temperature * 10) / 10).toFixed(1) + "°C"; // Làm tròn đến 1 chữ số thập phân
+  var doAm = (Math.round(data.humidity * 10) / 10).toFixed(1) + "%"; // Làm tròn đến 1 chữ số thập phân
+  var co2 = Math.round(data.co2) + " ppm"; // Làm tròn đến số nguyên gần nhất
+  var voc = (Math.round(data.voc * 100) / 100).toFixed(2) + " ppm"; // Làm tròn đến 2 chữ số thập phân
+  var pm25 = Math.round(data.pm25) + " ug/m³"; // Làm tròn đến số nguyên gần nhất
+
+  // Thêm hàng mới vào sheet với dữ liệu đã định dạng
+  sheet.appendRow([date, time, nhietDo, doAm, co2, voc, pm25]);
+
+  // Định dạng lại toàn bộ sheet sau khi thêm hàng mới
+  var range = sheet.getDataRange();
+  range.setFontSize(12);
+  range.setHorizontalAlignment("center");
+  range.setVerticalAlignment("middle");
+
+  // Kiểm tra ngưỡng và tô màu đỏ nếu vượt ngưỡng
+  checkThresholdAndHighlight(data, [nhietDo, doAm, co2, voc, pm25], sheet);
+}
+
+function checkNewSheet() {
+  // Gửi yêu cầu tới Firebase để kiểm tra giá trị của node newsheet
+  var response = UrlFetchApp.fetch(firebaseUrl + "/newsheet.json?auth=" + firebaseApiKey);
+  var newSheetValue = JSON.parse(response.getContentText());
+
+  // Nếu giá trị của newsheet là 1, tạo một sheet mới
+  if (newSheetValue === 1) {
+    var newSheetName = createNewSheet();
+    if (newSheetName) {
+      resetNewSheetNode();
+      PropertiesService.getScriptProperties().setProperty('activeSheet', newSheetName);
+      getDataFromFirebase();
+    } else {
+      console.error('Failed to create a new sheet');
+    }
+  } else {
+    getDataFromFirebase();
+  }
+}
+
+function createNewSheet() {
+  // Tạo một sheet mới trong spreadsheet hiện tại
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheetName = generateUniqueSheetName();
+  var newSheet = spreadsheet.insertSheet(sheetName);
+
+  if (!newSheet) {
+    console.error('Failed to insert new sheet with name: ' + sheetName);
+    return null;
+  }
+
+  // Thêm hàng tiêu đề vào sheet mới
+  newSheet.appendRow(["Ngày", "Giờ", "Nhiệt độ (°C)", "Độ ẩm (%)", "CO2 (ppm)", "VOC (ppm)", "PM2.5 (ug/m³)"]);
+
+  // Định dạng toàn bộ sheet
+  var range = newSheet.getDataRange();
+  range.setFontSize(12);
+  range.setHorizontalAlignment("center");
+  range.setVerticalAlignment("middle");
+  
+  // Định dạng hàng đầu tiên (tiêu đề)
+  var headerRange = newSheet.getRange("A1:G1");
+  headerRange.setFontWeight("bold");
+  headerRange.setBackground("#6ea15d"); // Màu xanh lá cây
+
+  return sheetName;
+}
+
+function generateUniqueSheetName() {
+  // Tạo tên sheet duy nhất dựa trên thời gian hiện tại
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var timeZone = "GMT+7";
+  var baseName = "Sheet_" + Utilities.formatDate(new Date(), timeZone, "yyyyMMdd_HHmmss");
+  var uniqueName = baseName;
+  var counter = 1;
+
+  // Kiểm tra và đảm bảo tên sheet là duy nhất
+  while (spreadsheet.getSheetByName(uniqueName) !== null) {
+    uniqueName = baseName + "_" + counter;
+    counter++;
+  }
+  return uniqueName;
+}
+
+function resetNewSheetNode() {
+  // Reset giá trị của node newsheet trên Firebase về 0
+  var url = firebaseUrl + "/newsheet.json?auth=" + firebaseApiKey;
+  var payload = JSON.stringify(0);
+  var options = {
+    'method': 'put',
+    'contentType': 'application/json',
+    'payload': payload
+  };
+  UrlFetchApp.fetch(url, options);
+}
+
+function checkThresholdAndHighlight(data, rowData, sheet) {
+  var arlam = data.arlam; // Lấy giá trị của node "arlam"
+  var arlamEmail = data.arlam_email; // Lấy giá trị của node "arlam_email"
+  
+  // Nếu arlam là 0 thì không tô màu và in đậm, chỉ dừng lại tại đây
+  if (arlam === 0) {
+    return;
+  }
+
+  // Lấy giá trị ngưỡng từ Firebase
+  var temperatureThreshold = data["threshold temperature"];
+  var humidityThreshold = data["threshold humidity"];
+  var co2Threshold = data["threshold co2"];
+  var vocThreshold = data["threshold voc"];
+  var pm25Threshold = data["threshold pm25"];
+
+  // Chuyển đổi dữ liệu từ rowData về dạng số
+  var nhietDo = parseFloat(rowData[0]);
+  var doAm = parseFloat(rowData[1]);
+  var co2 = parseFloat(rowData[2]);
+  var voc = parseFloat(rowData[3]);
+  var pm25 = parseFloat(rowData[4]);
+
+  var row = sheet.getLastRow();
+  var shouldHighlight = false;
+
+  // Kiểm tra từng giá trị so với ngưỡng
+  if (nhietDo > temperatureThreshold) {
+    shouldHighlight = true;
+  }
+  if (doAm > humidityThreshold) {
+    shouldHighlight = true;
+  }
+  if (co2 > co2Threshold) {
+    shouldHighlight = true;
+  }
+  if (voc > vocThreshold) {
+    shouldHighlight = true;
+  }
+  if (pm25 > pm25Threshold) {
+    shouldHighlight = true;
+  }
+
+  // Nếu có giá trị vượt ngưỡng, tô màu đỏ và in đậm hàng tương ứng
+  if (shouldHighlight) {
+    var range = sheet.getRange(row, 1, 1, sheet.getLastColumn());
+    range.setBackground("#d14d3f"); // Màu đỏ
+    range.setFontWeight("bold"); // In đậm
+
+    // Gửi email cảnh báo nếu arlam_email là 1
+    if (arlamEmail === 1) {
+      sendAlertEmail(data.email, rowData);
+    }
+  }
+}
+
+function sendAlertEmail(email, rowData) {
+  // Tạo nội dung email cảnh báo
+  var subject = "CẢNH BÁO CHẤT LƯỢNG KHÔNG KHÍ";
+  var body = "<h3 style='color:#d14d3f;'>CẢNH BÁO CHẤT LƯỢNG KHÔNG KHÍ !!!</h3>" +
+             "<p><b><i>Thông tin chi tiết:</i></b></p>" +
+             "<ul style='margin: 0; padding-left: 20px;'>" +
+             "<li>Nhiệt độ: " + rowData[0] + "</li>" +
+             "<li>Độ ẩm: " + rowData[1] + "</li>" +
+             "<li>CO2: " + rowData[2] + "</li>" +
+             "<li>VOC: " + rowData[3] + "</li>" +
+             "<li>PM2.5: " + rowData[4] + "</li>" +
+             "</ul>";
+
+  // Gửi email
+  MailApp.sendEmail({
+    to: email,
+    subject: subject,
+    htmlBody: body
+  });
+}
+
+function createTrigger() {
+  // Xóa tất cả các trigger cũ trước khi tạo trigger mới
+  deleteAllTriggers();
+  ScriptApp.newTrigger('checkNewSheet')
+    .timeBased()
+    .everyMinutes(1)
+    .create();
+}
+
+function deleteAllTriggers() {
+  // Xóa tất cả các trigger hiện tại
+  var allTriggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < allTriggers.length; i++) {
+    ScriptApp.deleteTrigger(allTriggers[i]);
+  }
+}
+
+// Hàm thiết lập trigger, gọi để xóa tất cả các trigger cũ và tạo trigger mới duy nhất
+function setupTriggers() {
+  deleteAllTriggers();
+  createTrigger();
+}
